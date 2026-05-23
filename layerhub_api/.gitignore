@@ -1,0 +1,39 @@
+# Rails
+/log/*
+/tmp/*
+!/log/.keep
+!/tmp/.keep
+
+# Storage (uploaded files — local dev only)
+/storage/*
+!/storage/.keep
+/tmp/storage/*
+
+# Bootsnap cache
+/tmp/cache/
+
+# Environment-specific
+/.env
+/.env.*
+!/.env.example
+
+# Bundler
+/vendor/bundle/
+
+# Docker volumes (never committed)
+/node_modules/
+
+# Credentials — KEEP master.key out of git!
+/config/master.key
+/config/credentials/*.key
+
+# Kamal deploy secrets
+/.kamal/secrets
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
