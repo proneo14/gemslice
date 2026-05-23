@@ -5,3 +5,9 @@ Thumbs.db
 # IDE
 .idea/
 *.swp
+
+#env
+.env
+
+#learning
+learning.md

@@ -1,20 +1,4 @@
 services:
-  db:
-    image: postgres:15-alpine
-    environment:
-      POSTGRES_USER: layerhub
-      POSTGRES_PASSWORD: layerhub_dev
-      POSTGRES_DB: layerhub_development
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U layerhub"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   redis:
     image: redis:7-alpine
     ports:
@@ -37,15 +21,12 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      db:
-        condition: service_healthy
       redis:
         condition: service_healthy
-    environment:
-      DATABASE_URL: postgres://layerhub:layerhub_dev@db:5432/layerhub_development
-      REDIS_URL: redis://redis:6379/0
-      RAILS_ENV: development
-      DEVISE_JWT_SECRET_KEY: dev-secret-key-change-in-production
+    env_file: .env
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
 
   sidekiq:
     build:
@@ -57,16 +38,13 @@ services:
       - bundle_cache:/usr/local/bundle
       - storage:/app/storage
     depends_on:
-      db:
-        condition: service_healthy
       redis:
         condition: service_healthy
-    environment:
-      DATABASE_URL: postgres://layerhub:layerhub_dev@db:5432/layerhub_development
-      REDIS_URL: redis://redis:6379/0
-      RAILS_ENV: development
+    env_file: .env
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
 
 volumes:
-  pgdata:
   bundle_cache:
   storage:
