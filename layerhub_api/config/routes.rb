@@ -22,6 +22,14 @@ Rails.application.routes.draw do
       resources :projects do
         resources :print_assets
       end
+
+      # Slice endpoints
+      post "print_assets/:print_asset_id/slice", to: "slice_jobs#create"
+      resources :slice_jobs, only: [:show] do
+        member do
+          get :download
+        end
+      end
     end
   end
 end

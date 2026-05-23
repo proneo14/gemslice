@@ -5,7 +5,7 @@ class PrintAsset < ApplicationRecord
   has_one_attached :source_file
   has_many :asset_tags, dependent: :destroy
   has_many :tags, through: :asset_tags
-  # has_many :slice_jobs, dependent: :destroy  # Phase 3
+  has_many :slice_jobs, dependent: :destroy
 
   validates :name, presence: true
   validates :file_type, inclusion: { in: %w[stl gcode 3mf], allow_blank: true }
