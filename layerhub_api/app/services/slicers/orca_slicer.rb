@@ -62,11 +62,14 @@ module Slicers
         end
       end
 
-      # When brim_width is 0, force brim_type to "no_brim" so OrcaSlicer
-      # doesn't auto-add a brim via its default "auto_brim" behavior.
+      # Always explicitly set brim_type to prevent OrcaSlicer's default
+      # "auto_brim" behavior from adding unwanted brim.
       brim_w = (settings["brim_width"] || settings[:brim_width])
-      if brim_w && brim_w.to_f.zero?
+      if brim_w.nil? || brim_w.to_f.zero?
         base["brim_type"] = "no_brim"
+        base["brim_width"] = "0"
+      else
+        base["brim_type"] = "outer_only"
       end
 
       path = File.join(output_dir, "process_override.json")

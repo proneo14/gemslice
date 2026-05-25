@@ -215,6 +215,8 @@ onMounted(async () => {
       return
     }
     const promises = []
+    // Skip loading other assets if plate state was restored from localStorage
+    if (stlViewerRef.value.plateRestored) return
     for (const a of assetsStore.assets) {
       if (String(a.id) !== String(assetId.value) && a.source_file_url) {
         promises.push(stlViewerRef.value.loadModelFromUrl(a.source_file_url, a.file_type, a.id))

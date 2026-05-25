@@ -71,7 +71,7 @@ function buildPlate() {
   plate.position.set(w / 2, -0.1, d / 2)
   scene.add(plate)
 
-  const grid = new THREE.GridHelper(w, w / 10, 0x555555, 0x444444)
+  const grid = new THREE.GridHelper(w, Math.round(w / 10), 0x555555, 0x444444)
   grid.position.set(w / 2, 0, d / 2)
   scene.add(grid)
 }

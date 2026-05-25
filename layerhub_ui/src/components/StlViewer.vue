@@ -24,9 +24,16 @@ const transformMode = ref("translate")
 const modelDims = ref(null)
 const dragging = ref(false)
 
+// Multi-plate state
+const plates = ref([{ id: 1, name: 'Plate 1' }])
+const currentPlateId = ref(1)
+const plateObjectStore = {} // plateId -> [THREE.Object3D]
+const plateRestored = ref(false)
+let nextPlateId = 2
+
 let renderer, scene, camera, controls, transformCtrl, animationId, resizeObs
 let selectedObject = null
-const objects = [] // multiple objects on plate
+const objects = [] // current plate's objects
 
 // Undo/redo state — tracks full scene snapshots (position, rotation, scale, and object presence)
 const undoStack = []
@@ -158,24 +165,42 @@ function buildPlate(w, d) {
   scene.add(plate)
 
   // Grid
-  const grid = new THREE.GridHelper(w, w / 10, 0x555555, 0x444444)
+  const grid = new THREE.GridHelper(w, Math.round(w / 10), 0x555555, 0x444444)
   grid.position.set(w / 2, 0, d / 2)
+  grid.userData.isBed = true
   scene.add(grid)
 
   // Border
   const pts = [new THREE.Vector3(0,0.05,0), new THREE.Vector3(w,0.05,0), new THREE.Vector3(w,0.05,d), new THREE.Vector3(0,0.05,d), new THREE.Vector3(0,0.05,0)]
-  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0x666666 })))
+  const border = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0x666666 }))
+  border.userData.isBed = true
+  scene.add(border)
 }
 
 function buildAxes(w) {
   const len = w * 0.12
   const makeAxis = (end, color) => {
     const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0.2,0), end])
-    scene.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color })))
+    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color }))
+    line.userData.isBed = true
+    scene.add(line)
   }
   makeAxis(new THREE.Vector3(len, 0.2, 0), 0xff4444)
   makeAxis(new THREE.Vector3(0, len, 0), 0x44ff44)
   makeAxis(new THREE.Vector3(0, 0.2, len), 0x4444ff)
+}
+
+function rebuildBed(w, d) {
+  const toRemove = scene.children.filter(c => c.userData.isBed)
+  for (const obj of toRemove) {
+    scene.remove(obj)
+    if (obj.geometry) obj.geometry.dispose()
+    if (obj.material) obj.material.dispose()
+  }
+  buildPlate(w, d)
+  buildAxes(w)
+  controls.target.set(w / 2, 0, d / 2)
+  controls.update()
 }
 
 function animate() {
@@ -234,7 +259,7 @@ function updateDimensions() {
 
 // --- Transform persistence via localStorage (per-project, keyed by assetId) ---
 function getStorageKey() {
-  return props.projectId ? `gemslice_transforms_project_${props.projectId}` : null
+  return props.projectId ? `gemslice_transforms_project_${props.projectId}_plate_${currentPlateId.value}` : null
 }
 
 function saveTransforms() {
@@ -251,6 +276,104 @@ function saveTransforms() {
     }
   }
   try { localStorage.setItem(key, JSON.stringify(data)) } catch {}
+  savePlateConfig()
+}
+
+// --- Plate persistence ---
+function savePlateConfig() {
+  if (!props.projectId) return
+  const pkey = `gemslice_plates_project_${props.projectId}`
+  const config = {
+    plates: plates.value,
+    nextPlateId,
+    activePlateId: currentPlateId.value,
+    plateAssets: {}
+  }
+  for (const plate of plates.value) {
+    const objs = plate.id === currentPlateId.value ? objects : (plateObjectStore[plate.id] || [])
+    config.plateAssets[plate.id] = objs.map(obj => ({
+      sourceUrl: obj.userData.sourceUrl || null,
+      fileType: obj.userData.fileType || 'stl',
+      assetId: obj.userData.assetId || null,
+      px: obj.position.x, py: obj.position.y, pz: obj.position.z,
+      qx: obj.quaternion.x, qy: obj.quaternion.y, qz: obj.quaternion.z, qw: obj.quaternion.w,
+      sx: obj.scale.x, sy: obj.scale.y, sz: obj.scale.z
+    })).filter(a => a.sourceUrl)
+  }
+  try { localStorage.setItem(pkey, JSON.stringify(config)) } catch {}
+  savePlateAssignments()
+}
+
+async function restorePlateConfig() {
+  if (!props.projectId) return false
+  const pkey = `gemslice_plates_project_${props.projectId}`
+  try {
+    const raw = localStorage.getItem(pkey)
+    if (!raw) return false
+    const config = JSON.parse(raw)
+    if (!config.plates || config.plates.length === 0) return false
+
+    // Set flag immediately (before async model loads) so AssetDetailView
+    // doesn't race and add duplicate models via loadOtherAssets()
+    plateRestored.value = true
+
+    plates.value = config.plates
+    nextPlateId = config.nextPlateId || config.plates.length + 1
+    currentPlateId.value = config.activePlateId || config.plates[0].id
+
+    for (const plate of config.plates) {
+      const assets = config.plateAssets[plate.id] || []
+      const loaded = []
+      for (const asset of assets) {
+        const group = await loadModelRaw(asset.sourceUrl, asset.fileType, asset.assetId)
+        if (group) {
+          group.position.set(asset.px, asset.py, asset.pz)
+          group.quaternion.set(asset.qx, asset.qy, asset.qz, asset.qw)
+          group.scale.set(asset.sx, asset.sy, asset.sz)
+          group.updateMatrixWorld(true)
+          loaded.push(group)
+        }
+      }
+      if (plate.id === currentPlateId.value) {
+        for (const obj of loaded) { scene.add(obj); objects.push(obj) }
+      } else {
+        plateObjectStore[plate.id] = loaded
+      }
+    }
+    if (objects.length > 0) selectObject(objects[0])
+    return true
+  } catch (e) {
+    console.error('Failed to restore plate config:', e)
+    plateRestored.value = false
+    return false
+  }
+}
+
+function loadModelRaw(url, fileType, assetId) {
+  if (!url) return Promise.resolve(null)
+  const ft = (fileType || '').toLowerCase()
+  const group = new THREE.Group()
+  if (assetId) group.userData.assetId = assetId
+  group.userData.sourceUrl = url
+  group.userData.fileType = ft
+  return new Promise((resolve) => {
+    const onLoaded = () => { centerGizmoOnObject(group); resolve(group) }
+    if (ft === '3mf') {
+      new ThreeMFLoader().load(url, (loaded) => {
+        loaded.traverse(c => { if (c.isMesh) { if (!c.material) c.material = defaultMaterial.clone(); c.castShadow = true } })
+        group.add(loaded)
+        onLoaded()
+      }, undefined, () => resolve(null))
+    } else {
+      new STLLoader().load(url, (geometry) => {
+        geometry.computeVertexNormals()
+        const mesh = new THREE.Mesh(geometry, defaultMaterial.clone())
+        mesh.castShadow = true
+        group.add(mesh)
+        onLoaded()
+      }, undefined, () => resolve(null))
+    }
+  })
 }
 
 function restoreTransforms() {
@@ -307,21 +430,81 @@ function centerGizmoOnObject(group) {
   group.updateMatrixWorld(true)
 }
 
+// --- Plate assignment persistence ---
+function getPlateAssignKey() {
+  return props.projectId ? `gemslice_plate_assign_${props.projectId}` : null
+}
+
+function loadPlateAssignments() {
+  const key = getPlateAssignKey()
+  if (!key) return {}
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? JSON.parse(raw) : {}
+  } catch { return {} }
+}
+
+function savePlateAssignments() {
+  const key = getPlateAssignKey()
+  if (!key) return
+  const map = {}
+  for (const obj of objects) {
+    const id = obj.userData.assetId
+    if (id) map[String(id)] = currentPlateId.value
+  }
+  for (const [plateId, objs] of Object.entries(plateObjectStore)) {
+    for (const obj of objs) {
+      const id = obj.userData.assetId
+      if (id) map[String(id)] = Number(plateId)
+    }
+  }
+  try { localStorage.setItem(key, JSON.stringify(map)) } catch {}
+}
+
+function isAssetOnAnyPlate(assetId, sourceUrl) {
+  const check = (o) =>
+    (assetId && o.userData.assetId && String(o.userData.assetId) === String(assetId)) ||
+    (sourceUrl && o.userData.sourceUrl === sourceUrl)
+  if (objects.some(check)) return true
+  for (const objs of Object.values(plateObjectStore)) {
+    if (objs.some(check)) return true
+  }
+  return false
+}
+
 function loadModelFromUrl(url, fileType, assetId = null) {
   if (!scene || !url) return Promise.resolve()
+
+  // Skip if already loaded on any plate
+  if (isAssetOnAnyPlate(assetId, url)) return Promise.resolve()
+
   loadError.value = ""
 
   const ft = (fileType || "").toLowerCase()
   const group = new THREE.Group()
   if (assetId) group.userData.assetId = assetId
+  group.userData.sourceUrl = url
+  group.userData.fileType = ft
 
   return new Promise((resolve) => {
     const onLoaded = () => {
       centerGizmoOnObject(group)
       placeOnBed(group)
-      scene.add(group)
-      objects.push(group)
-      selectObject(group)
+
+      // Check if this asset belongs to a different plate
+      const assignments = loadPlateAssignments()
+      const targetPlate = assetId ? assignments[String(assetId)] : null
+
+      if (targetPlate && targetPlate !== currentPlateId.value && plates.value.some(p => p.id === targetPlate)) {
+        // Route to the correct plate without adding to current scene
+        if (!plateObjectStore[targetPlate]) plateObjectStore[targetPlate] = []
+        plateObjectStore[targetPlate].push(group)
+      } else {
+        scene.add(group)
+        objects.push(group)
+        selectObject(group)
+      }
+      savePlateConfig()
       resolve()
     }
 
@@ -366,6 +549,7 @@ function loadModelFromFile(file) {
       scene.add(group)
       objects.push(group)
       selectObject(group)
+      savePlateConfig()
     } catch (err) {
       loadError.value = "Failed to parse file: " + file.name
     }
@@ -594,6 +778,36 @@ function deleteSelected() {
   if (deletedAssetId) emit('asset-deleted', deletedAssetId)
 }
 
+// --- Clipboard (copy / cut / paste) ---
+let clipboard = null
+
+function copySelected() {
+  if (!selectedObject) return
+  clipboard = selectedObject
+}
+
+function cutSelected() {
+  if (!selectedObject) return
+  copySelected()
+  deleteSelected()
+}
+
+function pasteClipboard() {
+  if (!clipboard) return
+  saveState()
+  const clone = clipboard.clone()
+  clone.userData = { ...clipboard.userData }
+  // Offset so the paste doesn't overlap the original
+  clone.position.x += 20
+  clone.position.z += 20
+  const box = new THREE.Box3().setFromObject(clone)
+  if (box.min.y < 0) clone.position.y -= box.min.y
+  scene.add(clone)
+  objects.push(clone)
+  selectObject(clone)
+  saveTransforms()
+}
+
 // --- View presets ---
 function resetView() {
   const w = props.bedWidth, d = props.bedDepth
@@ -647,15 +861,21 @@ function onKeyDown(e) {
   if (e.ctrlKey || e.metaKey) {
     if (e.key === 'z') { e.preventDefault(); undo() }
     else if (e.key === 'y') { e.preventDefault(); redo() }
+    else if (e.key === 'c') { e.preventDefault(); copySelected() }
+    else if (e.key === 'x') { e.preventDefault(); cutSelected() }
+    else if (e.key === 'v') { e.preventDefault(); pasteClipboard() }
   }
   if (e.key === 'Delete' || e.key === 'Backspace') {
     if (e.target.tagName !== 'INPUT') deleteSelected()
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   init()
-  if (props.url) loadModelFromUrl(props.url, props.fileType, props.assetId)
+  const restored = await restorePlateConfig()
+  if (!restored && props.url) {
+    await loadModelFromUrl(props.url, props.fileType, props.assetId)
+  }
   resizeObs = new ResizeObserver(() => handleResize())
   if (container.value) resizeObs.observe(container.value)
   window.addEventListener("keydown", onKeyDown)
@@ -671,7 +891,63 @@ onUnmounted(() => {
   controls?.dispose()
 })
 
-watch(() => props.url, (u) => { if (u) loadModelFromUrl(u, props.fileType, props.assetId) })
+watch(() => props.url, (u) => {
+  if (!u) return
+  // loadModelFromUrl already has duplicate + plate-assignment checks
+  loadModelFromUrl(u, props.fileType, props.assetId)
+})
+
+watch(() => [props.bedWidth, props.bedDepth], ([w, d]) => {
+  if (scene) rebuildBed(w, d)
+})
+
+// --- Multi-plate management ---
+function switchToPlate(plateId) {
+  if (plateId === currentPlateId.value) return
+  // Deselect
+  transformCtrl.detach()
+  selectedObject = null
+  modelDims.value = null
+  // Save current plate's objects
+  plateObjectStore[currentPlateId.value] = [...objects]
+  // Remove current objects from scene
+  for (const obj of objects) scene.remove(obj)
+  objects.length = 0
+  // Load new plate's objects
+  const plateObjs = plateObjectStore[plateId] || []
+  for (const obj of plateObjs) {
+    scene.add(obj)
+    objects.push(obj)
+  }
+  currentPlateId.value = plateId
+  savePlateConfig()
+}
+
+function addPlate() {
+  const id = nextPlateId++
+  plates.value.push({ id, name: `Plate ${id}` })
+  switchToPlate(id)
+}
+
+function removePlate(plateId) {
+  if (plates.value.length <= 1) return
+  // Remove objects from this plate
+  const objs = plateObjectStore[plateId] || []
+  if (plateId === currentPlateId.value) {
+    for (const obj of objects) scene.remove(obj)
+    objects.length = 0
+  }
+  for (const obj of objs) {
+    if (obj.geometry) obj.geometry.dispose()
+  }
+  delete plateObjectStore[plateId]
+  plates.value = plates.value.filter(p => p.id !== plateId)
+  // Switch to first remaining plate if we removed the active one
+  if (plateId === currentPlateId.value) {
+    switchToPlate(plates.value[0].id)
+  }
+  savePlateConfig()
+}
 
 // Export all objects on the bed as a single binary STL for the slicer.
 // Converts Three.js Y-up to Slicer Z-up via Y↔Z swap.
@@ -709,7 +985,7 @@ function getCameraState() {
   }
 }
 
-defineExpose({ loadModelFromUrl, restoreTransforms, exportSceneAsSTL, getCameraState })
+defineExpose({ loadModelFromUrl, restoreTransforms, exportSceneAsSTL, getCameraState, currentPlateId, plates, plateRestored })
 </script>
 
 <template>
@@ -743,6 +1019,18 @@ defineExpose({ loadModelFromUrl, restoreTransforms, exportSceneAsSTL, getCameraS
 
     <!-- 3D canvas -->
     <div ref="container" class="flex-1 min-h-0"></div>
+
+    <!-- Plate tabs -->
+    <div class="flex items-center gap-1 px-2 py-1.5 bg-[#2f2f2f] border-t border-gray-700 text-xs shrink-0">
+      <button v-for="plate in plates" :key="plate.id"
+        @click="switchToPlate(plate.id)"
+        :class="['group flex items-center gap-1 px-3 py-1 rounded cursor-pointer transition-colors', currentPlateId === plate.id ? 'bg-indigo-600 text-white' : 'bg-gray-600 text-gray-300 hover:bg-gray-500']"
+      >
+        {{ plate.name }}
+        <span v-if="plates.length > 1" @click.stop="removePlate(plate.id)" class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-400 ml-0.5">&times;</span>
+      </button>
+      <button @click="addPlate" class="px-2 py-1 rounded bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200 cursor-pointer" title="Add Plate">+</button>
+    </div>
 
     <!-- Dimension & Transform bar -->
     <div class="flex items-center gap-2 px-3 py-2 bg-[#333] border-t border-gray-700 text-xs text-gray-300 shrink-0">
