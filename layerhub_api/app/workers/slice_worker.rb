@@ -6,7 +6,13 @@ class SliceWorker
 
   def perform(slice_job_id, settings = {})
     job = SliceJob.find(slice_job_id)
-    job.slicing!
+
+    # Acquire a row-level lock and atomically transition to :slicing.
+    # If another worker already claimed this job, bail out.
+    job.with_lock do
+      return unless job.pending?
+      job.slicing!
+    end
 
     Dir.mktmpdir("layerhub") do |tmpdir|
       # Use scene file (combined STL with transforms) if available,
@@ -24,7 +30,7 @@ class SliceWorker
       slicer.slice(input_path, sliced_path, settings: settings.symbolize_keys)
 
       # Step 2: Post-process the G-code
-      job.post_processing!
+      job.with_lock { job.post_processing! }
       swaps = job.color_swaps.map do |cs|
         { layer_number: cs.layer_number, pause_type: cs.pause_type, color_label: cs.color_label }
       end
@@ -35,17 +41,19 @@ class SliceWorker
         color_swaps: swaps
       ).process
 
-      # Step 3: Attach output and update metadata
-      job.output_gcode.attach(
-        io: File.open(output_path),
-        filename: "#{job.print_asset.name.parameterize}-processed.gcode",
-        content_type: "text/x-gcode"
-      )
-      job.update!(
-        status: :completed,
-        estimated_time: result.estimated_time,
-        material_used: result.material_used
-      )
+      # Step 3: Attach output and update metadata (locked to prevent duplicate attachments)
+      job.with_lock do
+        job.output_gcode.attach(
+          io: File.open(output_path),
+          filename: "#{job.print_asset.name.parameterize}-processed.gcode",
+          content_type: "text/x-gcode"
+        )
+        job.update!(
+          status: :completed,
+          estimated_time: result.estimated_time,
+          material_used: result.material_used
+        )
+      end
     end
   rescue Exception => e
     job&.update!(status: :failed, error_message: e.message.truncate(1000))

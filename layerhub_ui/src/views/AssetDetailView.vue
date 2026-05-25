@@ -209,9 +209,12 @@ onMounted(async () => {
   // Load all project assets onto the build plate
   await assetsStore.fetchAll(projectId.value)
   // Wait for StlViewer to mount, then load remaining project assets
+  let retryCount = 0
+  const maxRetries = 25 // 25 retries × escalating delay ≈ ~15s total
   const loadOtherAssets = async () => {
     if (!stlViewerRef.value) {
-      setTimeout(loadOtherAssets, 200)
+      if (retryCount++ >= maxRetries) return // give up
+      setTimeout(loadOtherAssets, Math.min(200 * Math.pow(1.5, retryCount), 2000))
       return
     }
     const promises = []

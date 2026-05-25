@@ -112,7 +112,15 @@ module Slicers
       files = Dir.glob(pattern).sort_by { |f| File.mtime(f) }
       raise SliceError, "OrcaSlicer produced no G-code output in #{output_dir}" if files.empty?
 
-      files.last
+      gcode = files.last
+
+      # Verify the file looks complete — OrcaSlicer writes an end comment
+      tail = File.size(gcode) > 4096 ? IO.read(gcode, 4096, File.size(gcode) - 4096) : File.read(gcode)
+      unless tail.match?(/; total layers count|M84|; filament used/)
+        raise SliceError, "G-code file appears incomplete: #{File.basename(gcode)}"
+      end
+
+      gcode
     end
 
     def shell_escape(path)

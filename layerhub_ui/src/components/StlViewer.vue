@@ -30,6 +30,10 @@ const currentPlateId = ref(1)
 const plateObjectStore = {} // plateId -> [THREE.Object3D]
 const plateRestored = ref(false)
 let nextPlateId = 2
+let unmounted = false
+
+// Track URLs currently being loaded to prevent timing-window duplicates
+const loadingUrls = new Set()
 
 let renderer, scene, camera, controls, transformCtrl, animationId, resizeObs
 let selectedObject = null
@@ -478,6 +482,11 @@ function loadModelFromUrl(url, fileType, assetId = null) {
   // Skip if already loaded on any plate
   if (isAssetOnAnyPlate(assetId, url)) return Promise.resolve()
 
+  // Prevent timing-window duplicates: reject if this URL is already being fetched
+  const loadKey = assetId ? `id:${assetId}` : `url:${url}`
+  if (loadingUrls.has(loadKey)) return Promise.resolve()
+  loadingUrls.add(loadKey)
+
   loadError.value = ""
 
   const ft = (fileType || "").toLowerCase()
@@ -488,6 +497,9 @@ function loadModelFromUrl(url, fileType, assetId = null) {
 
   return new Promise((resolve) => {
     const onLoaded = () => {
+      loadingUrls.delete(loadKey)
+      if (unmounted) { resolve(); return }
+
       centerGizmoOnObject(group)
       placeOnBed(group)
 
@@ -513,7 +525,7 @@ function loadModelFromUrl(url, fileType, assetId = null) {
         loaded.traverse((c) => { if (c.isMesh) { if (!c.material) c.material = defaultMaterial.clone(); c.castShadow = true } })
         group.add(loaded)
         onLoaded()
-      }, undefined, () => { loadError.value = "Failed to load 3MF"; resolve() })
+      }, undefined, () => { loadingUrls.delete(loadKey); loadError.value = "Failed to load 3MF"; resolve() })
     } else {
       new STLLoader().load(url, (geometry) => {
         geometry.computeVertexNormals()
@@ -521,7 +533,7 @@ function loadModelFromUrl(url, fileType, assetId = null) {
         mesh.castShadow = true
         group.add(mesh)
         onLoaded()
-      }, undefined, () => { loadError.value = "Failed to load STL"; resolve() })
+      }, undefined, () => { loadingUrls.delete(loadKey); loadError.value = "Failed to load STL"; resolve() })
     }
   })
 }
@@ -882,6 +894,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  unmounted = true
   resizeObs?.disconnect()
   window.removeEventListener("keydown", onKeyDown)
   renderer?.domElement?.removeEventListener("pointerdown", onPointerDown)
