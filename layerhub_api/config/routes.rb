@@ -28,6 +28,8 @@ Rails.application.routes.draw do
       resources :slice_jobs, only: [:show] do
         member do
           get :download
+          get :gcode_text
+          patch :cancel
         end
       end
     end

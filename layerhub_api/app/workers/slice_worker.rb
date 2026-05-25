@@ -4,18 +4,24 @@ class SliceWorker
   include Sidekiq::Job
   sidekiq_options queue: :slicing, retry: 1
 
-  def perform(slice_job_id)
+  def perform(slice_job_id, settings = {})
     job = SliceJob.find(slice_job_id)
     job.slicing!
 
     Dir.mktmpdir("layerhub") do |tmpdir|
-      input_path = download_source(job, tmpdir)
+      # Use scene file (combined STL with transforms) if available,
+      # otherwise fall back to the original asset source file
+      input_path = if job.scene_file.attached?
+        download_scene(job, tmpdir)
+      else
+        download_source(job, tmpdir)
+      end
       sliced_path = File.join(tmpdir, "sliced.gcode")
       output_path = File.join(tmpdir, "processed.gcode")
 
       # Step 1: Run the slicer
       slicer = resolve_slicer(job.slicer)
-      slicer.slice(input_path, sliced_path)
+      slicer.slice(input_path, sliced_path, settings: settings.symbolize_keys)
 
       # Step 2: Post-process the G-code
       job.post_processing!
@@ -41,7 +47,7 @@ class SliceWorker
         material_used: result.material_used
       )
     end
-  rescue Slicers::BaseSlicer::SliceError, StandardError => e
+  rescue Exception => e
     job&.update!(status: :failed, error_message: e.message.truncate(1000))
     raise # re-raise so Sidekiq can track the failure
   end
@@ -58,10 +64,17 @@ class SliceWorker
     path
   end
 
+  def download_scene(job, tmpdir)
+    path = File.join(tmpdir, "scene.stl")
+    File.open(path, "wb") { |f| f.write(job.scene_file.download) }
+    path
+  end
+
   def resolve_slicer(slicer_name)
     case slicer_name
-    when "prusa_slicer"  then Slicers::PrusaSlicer.new
-    when "bambu_studio"  then Slicers::BambuStudio.new
+    when "orca_slicer"   then Slicers::OrcaSlicer.new
+    when "prusa_slicer"  then Slicers::OrcaSlicer.new  # Use OrcaSlicer for all (PrusaSlicer removed)
+    when "bambu_studio"  then Slicers::OrcaSlicer.new
     else raise "Unknown slicer: #{slicer_name}"
     end
   end
